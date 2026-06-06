@@ -43,13 +43,24 @@ def backtrack(cur: Backoffs, startPos: Int, endPos: Int, i: Int, exitFn: Int => 
 
 private object BacktrackingProgMatcher {
     // TODO: encapsulate this state properly
-    /** Does the region of the program reachable from `start` (bounded by `end`,
-      * which for a loop body is the LOOP instruction itself) contain another LOOP?
-      * Used to decide whether the fast Backoffs path is safe: it isn't when a loop
-      * body nests another loop, because Backoffs treats each iteration atomically and
-      * cannot expose the inner loop's choice points to the outer continuation.
+    /** Is the flat Backoffs fast-path UNSOUND for this loop body (the region
+      * reachable from `start`, bounded by `end` = the LOOP instruction itself)?
+      *
+      * Backoffs summarises each iteration as a single greedy width and can only
+      * backtrack by dropping whole iterations. That is sound only when every
+      * iteration matches deterministically at a fixed width. Two things break it:
+      *   - a nested LOOP: an inner loop can give reps back, so an iteration has no
+      *     single width (e.g. `(b*)*bc`);
+      *   - an ALT: a branch of a different length, or an unexplored alternative,
+      *     is a choice point Backoffs discards (e.g. `(a|ab)*c`).
+      * Such bodies must use the recursive (continuation-threaded) path instead.
+      *
+      * Conservative: ANY alternation is treated as unsafe, even equal-width
+      * mutually-exclusive ones like `(a|b)` that Backoffs could in fact handle.
+      * Unknown ops also fall through to "unsafe", since the recursive path is
+      * always correct and Backoffs is only an optimisation.
       */
-    private def regionHasLoop(prog: Prog, start: Int, end: Int): Boolean = {
+    private def bodyNeedsRecursivePath(prog: Prog, start: Int, end: Int): Boolean = {
         val seen = scala.collection.mutable.Set.empty[Int]
         def go(pc: Int): Boolean =
             if (pc == end || seen(pc)) false
@@ -57,10 +68,12 @@ private object BacktrackingProgMatcher {
                 seen += pc
                 val inst = prog.getInst(pc)
                 inst.op match
-                    case InstOp.LOOP                => true
-                    case InstOp.MATCH | InstOp.FAIL => false
-                    case InstOp.ALT                 => go(inst.out) || go(inst.arg)
-                    case _                          => go(inst.out)
+                    case InstOp.ALT | InstOp.LOOP => true
+                    // fixed-width, deterministic, single successor: safe to summarise
+                    case InstOp.RUNE | InstOp.RUNE1 | InstOp.RUNE_ANY
+                       | InstOp.RUNE_ANY_NOT_NL | InstOp.CAPTURE
+                       | InstOp.NOP | InstOp.EMPTY_WIDTH => go(inst.out)
+                    case _ => true
             }
         go(start)
     }
@@ -105,13 +118,14 @@ private object BacktrackingProgMatcher {
 
                     '{ if ($pos < $input.length && $condExpr) then $succExpr else -1 }
 
-                // Nested loop in the body: Backoffs treats each iteration atomically
-                // and cannot give characters back to a later subexpression, so fall back
-                // to a recursive, continuation-threaded greedy star. This mirrors the CPS
-                // engine's Rep0, but stays a staged matcher over the Prog IR. Relies on
-                // quote hygiene: `loop`/`p` in the continuation bind to this quote's
-                // bindings, not to anything that shadows them at the inner splice site.
-                case InstOp.LOOP if regionHasLoop(prog, inst.out, pc) => '{
+                // Variable-width / ambiguous body (nested loop or alternation):
+                // Backoffs treats each iteration atomically and cannot give characters
+                // back to a later subexpression, so fall back to a recursive,
+                // continuation-threaded greedy star. This mirrors the CPS engine's
+                // Rep0, but stays a staged matcher over the Prog IR. Relies on quote
+                // hygiene: `loop`/`p` in the continuation bind to this quote's bindings,
+                // not to anything that shadows them at the inner splice site.
+                case InstOp.LOOP if bodyNeedsRecursivePath(prog, inst.out, pc) => '{
                     def loop(p: Int): Int = {
                         val step = ${compile(prog, inst.out, pc, input, noCaps, 'p, cap, wholeMatch,
                             (next: Expr[Int]) => '{ if ($next != p) loop($next) else -1 })}
