@@ -46,19 +46,38 @@ private object BacktrackingProgMatcher {
     /** Is the flat Backoffs fast-path UNSOUND for this loop body (the region
       * reachable from `start`, bounded by `end` = the LOOP instruction itself)?
       *
-      * Backoffs summarises each iteration as a single greedy width and can only
-      * backtrack by dropping whole iterations. That is sound only when every
-      * iteration matches deterministically at a fixed width. Two things break it:
-      *   - a nested LOOP: an inner loop can give reps back, so an iteration has no
-      *     single width (e.g. `(b*)*bc`);
-      *   - an ALT: a branch of a different length, or an unexplored alternative,
-      *     is a choice point Backoffs discards (e.g. `(a|ab)*c`).
-      * Such bodies must use the recursive (continuation-threaded) path instead.
+      * == Completeness boundary of Backoffs ==
       *
-      * Conservative: ANY alternation is treated as unsafe, even equal-width
-      * mutually-exclusive ones like `(a|b)` that Backoffs could in fact handle.
-      * Unknown ops also fall through to "unsafe", since the recursive path is
-      * always correct and Backoffs is only an optimisation.
+      * Backoffs does one greedy `forward` pass, records it as `(width, count)`
+      * frames, and `backtrack` only ever drops trailing iterations (it tries the
+      * loop's continuation at `finalPos - i*width`). So the only loop-end positions
+      * it can ever try are the prefixes of that ONE greedy run:
+      *     Reachable = { p0=start, p1, p2, ..., pn=finalPos }, p_{k+1} = p_k + width_k
+      * It stores the WIDTHS (the result of each choice), never the CHOICES.
+      *
+      * Theorem: Backoffs is complete iff the body is fixed-width and unambiguous
+      * (every position matches the body in at most one way, at a context-independent
+      * width).
+      *   - (sufficiency) Fixed width w + unique match => the only positions the loop
+      *     can legitimately stop at ARE {start, start+w, start+2w, ...}, i.e. exactly
+      *     Reachable, visited longest-first. Nothing is missed.
+      *   - (necessity) If the body can match at some position two ways with widths
+      *     w1 < w2 (an alternation of unequal-length branches) or a nested LOOP that
+      *     can give reps back, the valid loop-end positions lie on MULTIPLE chains,
+      *     one per sequence of choices. Greedy `forward` records a single chain C;
+      *     `backtrack` only visits C; a match on another chain C' is unreachable.
+      *     Witnesses: `(a|ab)*c` on "abc" needs the continuation at position 2 (chain
+      *     {0,2}), but greedy takes "a" => chain {0,1}, and 2 is off it; `(b*)*bc` on
+      *     "bbc" needs position 1, off the width-2 greedy chain {2,0}.
+      * Fixing this requires storing per-iteration choices (O(n) of them), which
+      * destroys the (width,count) compression: it becomes a choice-point stack
+      * (the recursive/continuation path), categorically more than Backoffs.
+      *
+      * So: return true (=> use the recursive path) for any body that is not provably
+      * fixed-width-unambiguous. Conservative: ANY alternation is treated as unsafe,
+      * even equal-width mutually-exclusive ones like `(a|b)` that Backoffs could in
+      * fact handle; unknown ops also fall through to "unsafe", since the recursive
+      * path is always correct and Backoffs is only an optimisation.
       */
     private def bodyNeedsRecursivePath(prog: Prog, start: Int, end: Int): Boolean = {
         val seen = scala.collection.mutable.Set.empty[Int]
