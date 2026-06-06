@@ -43,8 +43,33 @@ def backtrack(cur: Backoffs, startPos: Int, endPos: Int, i: Int, exitFn: Int => 
 
 private object BacktrackingProgMatcher {
     // TODO: encapsulate this state properly
-    private def compile(prog: Prog, pc: Int, end: Int, input: Expr[CharSequence], noCaps: Int, pos: Expr[Int], cap: Option[Expr[Array[Int]]], wholeMatch: Boolean)(using Quotes): Expr[Int] = {
-        if (pc == end) pos
+    /** Does the region of the program reachable from `start` (bounded by `end`,
+      * which for a loop body is the LOOP instruction itself) contain another LOOP?
+      * Used to decide whether the fast Backoffs path is safe: it isn't when a loop
+      * body nests another loop, because Backoffs treats each iteration atomically and
+      * cannot expose the inner loop's choice points to the outer continuation.
+      */
+    private def regionHasLoop(prog: Prog, start: Int, end: Int): Boolean = {
+        val seen = scala.collection.mutable.Set.empty[Int]
+        def go(pc: Int): Boolean =
+            if (pc == end || seen(pc)) false
+            else {
+                seen += pc
+                val inst = prog.getInst(pc)
+                inst.op match
+                    case InstOp.LOOP                => true
+                    case InstOp.MATCH | InstOp.FAIL => false
+                    case InstOp.ALT                 => go(inst.out) || go(inst.arg)
+                    case _                          => go(inst.out)
+            }
+        go(start)
+    }
+
+    // `k` is the continuation: the staged "rest of the match" invoked when control
+    // reaches `end`. Threading it lets an inner loop's exit see the outer context
+    // (the bug with nested loops was that exits at a loop boundary just returned `pos`).
+    private def compile(prog: Prog, pc: Int, end: Int, input: Expr[CharSequence], noCaps: Int, pos: Expr[Int], cap: Option[Expr[Array[Int]]], wholeMatch: Boolean, k: Expr[Int] => Expr[Int])(using Quotes): Expr[Int] = {
+        if (pc == end) k(pos)
         else {
             val inst = prog.getInst(pc)
             inst.op match
@@ -64,8 +89,8 @@ private object BacktrackingProgMatcher {
                 case InstOp.FAIL => '{ -1 }
 
                 case InstOp.ALT =>
-                    val leftExpr = compile(prog, inst.out, end, input, noCaps, pos, cap, wholeMatch)
-                    val rightExpr = compile(prog, inst.arg, end, input, noCaps, pos, cap, wholeMatch)
+                    val leftExpr = compile(prog, inst.out, end, input, noCaps, pos, cap, wholeMatch, k)
+                    val rightExpr = compile(prog, inst.arg, end, input, noCaps, pos, cap, wholeMatch, k)
                     '{
                         val lp = $leftExpr
                         if lp >= 0 then lp else $rightExpr
@@ -74,18 +99,34 @@ private object BacktrackingProgMatcher {
                 case InstOp.RUNE | InstOp.RUNE1 =>
                     val runeCheck = inst.matchRuneExpr
                     val nextPos = '{ $pos + 1 }
-                    val succExpr = compile(prog, inst.out, end, input, noCaps, nextPos, cap, wholeMatch)
+                    val succExpr = compile(prog, inst.out, end, input, noCaps, nextPos, cap, wholeMatch, k)
                     val charExpr: Expr[Int] = '{ $input.charAt($pos).toInt }
                     val condExpr: Expr[Boolean] = runeCheck(charExpr)
 
                     '{ if ($pos < $input.length && $condExpr) then $succExpr else -1 }
 
+                // Nested loop in the body: Backoffs treats each iteration atomically
+                // and cannot give characters back to a later subexpression, so fall back
+                // to a recursive, continuation-threaded greedy star. This mirrors the CPS
+                // engine's Rep0, but stays a staged matcher over the Prog IR. Relies on
+                // quote hygiene: `loop`/`p` in the continuation bind to this quote's
+                // bindings, not to anything that shadows them at the inner splice site.
+                case InstOp.LOOP if regionHasLoop(prog, inst.out, pc) => '{
+                    def loop(p: Int): Int = {
+                        val step = ${compile(prog, inst.out, pc, input, noCaps, 'p, cap, wholeMatch,
+                            (next: Expr[Int]) => '{ if ($next != p) loop($next) else -1 })}
+                        if (step >= 0) step
+                        else ${compile(prog, inst.arg, end, input, noCaps, 'p, cap, wholeMatch, k)}
+                    }
+                    loop($pos)
+                }
+
                 case InstOp.LOOP => '{
-                    def exit(pos: Int): Int = ${compile(prog, inst.arg, end, input, noCaps, 'pos, cap, wholeMatch)}
+                    def exit(pos: Int): Int = ${compile(prog, inst.arg, end, input, noCaps, 'pos, cap, wholeMatch, k)}
 
                     @tailrec
                     def forward(pos: Int, b: Backoffs | Null): (Backoffs | Null, Int) = {
-                        val next = ${compile(prog, inst.out, pc, input, noCaps, 'pos, cap, wholeMatch)}
+                        val next = ${compile(prog, inst.out, pc, input, noCaps, 'pos, cap, wholeMatch, (p: Expr[Int]) => p)}
 
                         if (next == -1 || next == pos) (b, pos)
                         else {
@@ -116,19 +157,20 @@ private object BacktrackingProgMatcher {
 
                 case InstOp.CAPTURE =>
                     val slot = inst.arg
-                    val nextExp = compile(prog, inst.out, end, input, noCaps, pos, cap, wholeMatch)
+                    val nextExp = compile(prog, inst.out, end, input, noCaps, pos, cap, wholeMatch, k)
 
                     cap match {
                         case Some(cap) if slot < noCaps =>
                             val slotIdx: Expr[Int] = Expr(slot)
+                            // Write the slot BEFORE matching the rest, and leave it on success.
+                            // (Writing it after success makes an outer loop iteration's value
+                            // clobber inner ones during unwind, recording the first iteration
+                            // instead of the last — wrong under repetition. Mirrors CPSMatcher.)
                             '{
                                 val oldVal = $cap($slotIdx)
-                                val curPos = $pos
+                                $cap($slotIdx) = $pos
                                 val res = $nextExp
-                                if (res >= 0) {
-                                    $cap($slotIdx) = curPos
-                                    res
-                                }
+                                if (res >= 0) res
                                 else {
                                     $cap($slotIdx) = oldVal
                                     -1
@@ -145,7 +187,7 @@ private object BacktrackingProgMatcher {
     }
 
     def genMatcher(prog: Prog)(using Quotes): Expr[CharSequence => Boolean] = '{ (input: CharSequence) =>
-        val result: Int = ${compile(prog, prog.start, prog.numInst, 'input, 0, '{ 0 }, cap = None, wholeMatch = true)}
+        val result: Int = ${compile(prog, prog.start, prog.numInst, 'input, 0, '{ 0 }, cap = None, wholeMatch = true, k = (p: Expr[Int]) => p)}
         result == input.length
     }
 
@@ -153,13 +195,13 @@ private object BacktrackingProgMatcher {
         val groups = Array.fill(${Expr(prog.numCap)})(-1)
         groups(0) = 0
 
-        val result: Int = ${compile(prog, prog.start, prog.numInst, 'input, prog.numCap, '{ 0 }, cap = Some('groups), wholeMatch = true)}
+        val result: Int = ${compile(prog, prog.start, prog.numInst, 'input, prog.numCap, '{ 0 }, cap = Some('groups), wholeMatch = true, k = (p: Expr[Int]) => p)}
 
         if result == input.length then Some(groups) else None
     }
 
     def genPrefixFind(prog: Prog)(using Quotes): Expr[(Int, CharSequence) => Int] = '{ (startPos: Int, input: CharSequence) =>
-        /*val result: Int = */${compile(prog, prog.start, prog.numInst, 'input, 0, 'startPos, cap = None,  wholeMatch = false)}
+        /*val result: Int = */${compile(prog, prog.start, prog.numInst, 'input, 0, 'startPos, cap = None,  wholeMatch = false, k = (p: Expr[Int]) => p)}
         //result
     }
 
