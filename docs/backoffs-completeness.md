@@ -126,7 +126,9 @@ bodyNeedsRecursivePath(B)  ==  ¬(B is fixed-width and unambiguous)   (Theorem 1
 ```
 
 - `false` ⟹ Backoffs: still threads the exit continuation, but replaces body
-  re-matching with arithmetic — complete (Thm 1) and strictly cheaper (Thm 2).
+  re-matching with arithmetic — complete (Thm 1) and cheaper (Thm 2) *when the loop is the
+  outer/standalone control*. As an inner loop re-entered under a recursive outer loop its
+  per-run allocation can make it a net loss — see Empirical results §3.
 - `true`  ⟹ recursive path = staged CPS: complete and work-optimal (Thm 2); a VM or a
   choice-augmented Backoffs only adds overhead.
 
@@ -144,3 +146,81 @@ alternations of both, nested-recursive-then-Backoffs): full agreement.
 - **`CPSMatcher` the *engine*: redundant.** That technique already lives inside the Prog
   recursive path; a separate Pattern-based engine is useful only as a differential test
   oracle. Prog subsumes CPS by *internalising* it, not by avoiding it.
+
+## Empirical results (JMH)
+
+Three JMH suites (in `benchmark/`) compare the staged Prog matcher, the staged CPS
+matcher (`StagedEngines` exposes both for the same regex), and `java.util.regex` as an
+independent reference. The headline claim "Prog dominates CPS" survives, but the data
+**refines it into three regimes** and turns up one case where Prog is genuinely *worse*.
+All figures are AverageTime µs/op (lower is better) on one machine/JVM — treat them as
+ratios, not absolutes.
+
+### 1. Backoffs regime: Prog strictly beats CPS — by a constant *and* a complexity class
+
+`EngineScalingBenchmark` sweeps input length over fixed-width unambiguous loops:
+
+| pattern | n | Prog | CPS | CPS/Prog |
+|---|---:|---:|---:|---:|
+| `[a-z]*#` | 1024 | 2.68 | 4.51 | 1.68× |
+| `[a-z]*#` | 16384 | 43.0 | 76.3 | 1.77× |
+| `(abc)*d` | 1024 | 0.90 | 1.66 | 1.84× |
+| `(abc)*d` | 16384 | 14.4 | 29.5 | 2.06× |
+
+The ratio is **stable across a 64× size range** (~1.8–2×): both are linear, Prog has the
+better constant (arithmetic backtrack + tight `@tailrec` loop vs CPS's per-iteration
+method call). More importantly the difference is **also a complexity class in stack
+usage**: CPS's `Rep0` recurses non-tail (one frame per iteration, O(n) stack), so
+`EngineStackRobustnessTests` shows CPS **StackOverflows at n ≈ 131 072** on `a*` while
+Prog's O(1)-stack Backoffs matches **1 000 000+** fine. That is the sharpest sense in
+which CPS is strictly worse here.
+
+The GC profiler (`-prof gc`) **corrects a tempting but wrong mechanism**: CPS does *not*
+lose on allocation. Staging inlines its continuations, so CPS allocates ≈0 B/op; Prog
+allocates a *constant* 40 B/op (the count-compressed Backoffs frame + the
+`(Backoffs|Null, Int)` tuple). The win is call/stack overhead, not garbage.
+
+### 2. Recursive regime, no inner Backoffs loop: Prog = CPS (confirms Theorem 2)
+
+For ambiguous bodies whose branches are themselves fixed (`(a|b)*#`,
+`(?:foo|bar|baz|qux)+`), Prog drops to its recursive path, which *is* staged CPS. The
+benchmarks agree to within noise at every size (e.g. `(a|b)*#`: 1.01–1.04× across
+256–16384; `altkw`: 3.39 vs 3.40). Both allocate ≈0. This is the experimental control
+for Theorem 2, and it behaves exactly as predicted: off the boundary, Backoffs can
+neither help nor hurt.
+
+### 3. Recursive regime *with* an inner Backoffs loop under heavy re-entry: Prog < CPS
+
+This is the **new finding the theory implied but no earlier test exposed**.
+`ComplexPatternBenchmark`'s `(?:a+)+b` on `"a"*20` (nested loop ⇒ recursive outer, with
+the inner `a+` on the Backoffs fast-path) fails and backtracks exponentially:
+
+| | Prog | CPS | Java |
+|---|---:|---:|---:|
+| time (µs/op) | 3675 | **2132** | 1.50 |
+| alloc (B/op) | **6 291 505** | ≈0 | 808 |
+
+Prog is **1.7× slower than CPS and allocates 6.3 MB/op**. Cause: the inner `a+` Backoffs
+loop is re-run on every step of the outer exponential search, and *each* re-run pays
+Backoffs' frame + tuple allocation — overhead that staged CPS (pure stack recursion) does
+not have. This is precisely the "collapses into the recursive path, plus the overhead of
+maintaining the frame records — strictly worse, never better" consequence of Theorem 2,
+now observed in the *production* engine, not just the choice-augmented probe.
+
+**Refinement to the architecture claim.** Backoffs is a net win only when its loop is the
+**outer/standalone** control. As an **inner** loop re-entered under an ambiguous outer
+loop, its allocation makes Prog *worse* than plain CPS. The completeness boundary
+(Theorem 1) is unchanged; what shifts is the *performance* story: `bodyNeedsRecursivePath`
+correctly routes the outer loop to recursion, but it still lets the inner fixed-width loop
+use allocating Backoffs, which is the liability. Making Backoffs allocation-free (or
+suppressing it for inner loops under a recursive ancestor) would close this gap — see the
+memory-efficiency work.
+
+### vs `java.util.regex`
+
+On **structured** patterns Prog beats Java 2–3.4× (`email` 2.4×, `csv` 3.3×, `path` 2.5×,
+`quad` 3.4×). Java wins only (a) on a bare single-class loop `[a-z]*#` (~1.5–2.5×, almost
+certainly a JDK intrinsic) and (b) spectacularly on `(?:a+)+b` (1.5 µs — it clearly does
+not perform the 2¹⁹ walk our naive backtracker does). Two honest caveats: Oregano has **no
+ReDoS mitigation**, and Java itself failed to complete `(a|b)*#` at n ≥ 4096 (its own
+long-input blowup), where both Oregano engines stayed linear.
