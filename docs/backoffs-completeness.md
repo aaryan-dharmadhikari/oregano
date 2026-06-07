@@ -103,15 +103,44 @@ of body evaluations as recursion (e.g. `(a|ab)*c` on `"ab"×8+"c"`: 43 vs 43; on
 `"a"×16+"c"`: 19 vs 19) — it re-runs `forward` on each branch flip, i.e. it is the
 recursive backtracker, plus the cost of maintaining the frame records. No win.
 
-## Design consequence
+## CPS is the substrate; Backoffs is a body-re-matching elimination
+
+It is tempting to read Backoffs and CPS as two alternative engines. They are not. The
+recursive path *is* staged CPS — it threads a continuation `k` per instruction and
+inlines it away at compile time. And even **Backoffs threads the loop's *exit*
+continuation**: `exit(pos)` is "what must match after the loop", carrying `k`. So the
+continuation is the substrate *everywhere*.
+
+What Backoffs uniquely does is eliminate the need to **re-match the body** to find the
+next loop-end position: when the body is fixed-width and unambiguous, those positions
+form an arithmetic progression (`finalPos − i·width`), so backtracking the loop is
+arithmetic instead of re-running the body. That elimination is sound exactly on the
+Theorem 1 boundary, and Theorem 2 says it is the *only* place a complete mechanism can
+beat CPS. Off the boundary, re-matching is unavoidable, and re-matching-under-`k` *is*
+CPS — so you are doing CPS by necessity.
+
+So the architecture is **one CPS substrate with a Backoffs fast-path layered on top**:
 
 ```
 bodyNeedsRecursivePath(B)  ==  ¬(B is fixed-width and unambiguous)   (Theorem 1)
 ```
 
-- `false` ⟹ Backoffs: complete (Thm 1) and strictly cheaper (no re-matching, Thm 2).
-- `true`  ⟹ recursive continuation path: complete, and work-optimal (Thm 2) — a VM
-  or a choice-augmented Backoffs would only add overhead.
+- `false` ⟹ Backoffs: still threads the exit continuation, but replaces body
+  re-matching with arithmetic — complete (Thm 1) and strictly cheaper (Thm 2).
+- `true`  ⟹ recursive path = staged CPS: complete and work-optimal (Thm 2); a VM or a
+  choice-augmented Backoffs only adds overhead.
 
-So the hybrid is not a compromise; it is each regime's best mechanism, split along
-the exact line where Backoffs stops being both complete and cheaper.
+The two **compose freely through the shared continuation `k`** — a Backoffs loop's
+`exit` may run a recursive loop, and a recursive loop's body or exit may contain
+Backoffs loops. `StagedHybridCompositionFuzz` checks the staged hybrid against CPS over
+all short strings for such mixtures (Backoffs→recursive, recursive-wrapping-Backoffs,
+alternations of both, nested-recursive-then-Backoffs): full agreement.
+
+## What this says about needing CPS
+
+- **CPS the *technique* (continuation threading): required, permanently.** It is the
+  substrate; Theorem 2 says ambiguous bodies cannot be matched without it. Backoffs does
+  not remove it — Backoffs is layered on top and still uses it for the exit.
+- **`CPSMatcher` the *engine*: redundant.** That technique already lives inside the Prog
+  recursive path; a separate Pattern-based engine is useful only as a differential test
+  oracle. Prog subsumes CPS by *internalising* it, not by avoiding it.
