@@ -10,9 +10,12 @@ bodies, the recursive continuation path for everything else
 ## Background
 
 A greedy loop `B*` is matched by `Backoffs` as follows: a single greedy `forward`
-pass matches the body `B` repeatedly, recording the run as `(width, count)` frames
-(a `parent`-linked list); `backtrack` then tries the loop's continuation at
-positions obtained by *dropping trailing iterations*:
+pass matches the body `B` repeatedly, recording the run as a `(width, count)`
+summary (originally a `parent`-linked list of frames — in the supported regime
+this is always a *single* `(width, count)` pair, tracked in primitive locals; see
+[Implementation](#implementation-the-allocation-free-backoffs-rewrite)).
+`backtrack` then tries the loop's continuation at positions obtained by *dropping
+trailing iterations*:
 
 ```
 exit at   finalPos − i·width   for i = 0,1,…  (then descend to the parent frame)
@@ -147,6 +150,104 @@ alternations of both, nested-recursive-then-Backoffs): full agreement.
   recursive path; a separate Pattern-based engine is useful only as a differential test
   oracle. Prog subsumes CPS by *internalising* it, not by avoiding it.
 
+## Implementation: the allocation-free Backoffs rewrite
+
+Theorem 1 has a sharp corollary the first implementation did not exploit: **on the
+Backoffs path the loop body is always fixed-width, so the `(width, count)` frame list
+can never be longer than one frame.** That collapses the whole heap structure to three
+integers and lets the fast-path run with zero allocation.
+
+### What the original code allocated
+
+The first version mirrored the *general* picture from Background — a run of iterations
+as a `parent`-linked list of `(width, count)` frames, returned together with the final
+position:
+
+```scala
+def forward(pos: Int, b: Backoffs | Null): (Backoffs | Null, Int) =
+  ... new Backoffs(w, 1, b) ...                 // a frame whenever the width changes
+val (backoffs, finalPos) = forward(pos, null)   // a Tuple2 on every return
+backtrack(backoffs, finalPos, 0)
+```
+
+So each loop *entry* allocated, on the heap: (1) one or more `Backoffs` objects, and
+(2) the `(Backoffs | Null, Int)` `Tuple2` that `forward` returns. Measured: a constant
+**40 B/op** for a standalone loop, ballooning to **6.3 MB/op** for an inner loop
+re-entered under an exponential outer backtrack (§3).
+
+### Why the linked list was dead code
+
+`bodyNeedsRecursivePath` routes **every** `ALT` and nested `LOOP` to the recursive
+path. What survives to the Backoffs case is therefore a **straight-line chain of
+rune / zero-width instructions**, and each such iteration advances by the *same* width
+`w` (runes consume 1 character, zero-width ops 0). Consequently, inside `forward`:
+
+- the first iteration allocates `new Backoffs(w, 1, null)`;
+- every later iteration takes the `b.width == w` branch and just does `b.count += 1`.
+
+The width-mismatch branch — the *only* place a second frame, with a non-null `parent`,
+is ever created — **can never execute**. The list is always length 1, `parent` is
+always `null`, and `backtrack`'s descent to `cur.parent` always lands on the terminal
+`null` case right after the single frame. The general machinery was live code
+maintaining an invariant that the routing already guaranteed could not be violated.
+
+### The rewrite
+
+The single frame carries exactly three live scalars — `count`, `width`, `finalPos` —
+so the heap structure is replaced by three primitive `var`s, and the two recursive
+`def`s by two `while` loops:
+
+```scala
+// greedy forward scan: count iterations, record the (constant) width
+var scanPos = start; var count = 0; var width = 0; var scanning = true
+while scanning do
+  val next = <body matched from scanPos>
+  if next == -1 || next == scanPos then scanning = false
+  else { width = next - scanPos; count += 1; scanPos = next }
+val finalPos = scanPos
+
+// backtrack: drop trailing iterations; i == count lands exactly on start
+var i = 0; var result = -1
+while result < 0 && i <= count do
+  result = exit(finalPos - i * width); i += 1
+```
+
+Two points of rigour:
+
+- **`@tailrec` → `while` is *not* where the win comes from.** The Scala compiler lowers
+  a self-tail-recursive `def` to exactly this backward-jump loop — same bytecode, same
+  O(1) stack, same JIT treatment; `@tailrec` only *checks* tail-position, it emits
+  nothing extra. The entire saving is the two heap objects that no longer exist. (A
+  `@tailrec` version that returned a primitive-packed `Long` would allocate just as
+  little; the `while` form is simply the natural way to keep the results in locals.)
+- **The backtrack attempts are byte-for-byte identical.** It tries
+  `exit(finalPos − i·width)` for `i = 0 … count`. The terminal `i = count` gives
+  `finalPos − count·width = start`, which is *precisely* the old
+  `cur == null ⟹ exit(start)` step. Same positions, same order, same short-circuit —
+  so the rewrite is behaviour-preserving, confirmed by all 109 tests, the runtime
+  staging PBT (`staging.run` + diff against `java.util.regex`), and
+  `StagedHybridCompositionFuzz` (which exercises Backoffs-under-recursive re-entry).
+
+The `Backoffs` class and the dead `forward`/`backtrack` definitions were removed.
+
+### Effect
+
+| case | before | after |
+|---|---:|---:|
+| standalone Backoffs loop (`(?:dddd)+x`) | 40 B/op | **0.002 B/op** |
+| `[a-z]*#`, n = 16384 | grows with frames | **0.18 B/op** |
+| inner Backoffs under exponential outer (`(?:a+)+b`) | 6 291 505 B/op | **23 B/op** |
+
+There is **no time regression**: the single-loop regime keeps its 2–3× lead over CPS
+(§1; e.g. `[a-z]*#` at n = 16384, Prog 26.1 µs vs CPS 75.6 µs). Notably the
+`(?:a+)+b` *time* is essentially **unchanged** (≈3.4 ms, still ~1.6× slower than CPS)
+even though its allocation fell ~260 000×. That is an informative null result: the
+re-entry penalty of §3 is **the redundant body-rescanning work, not GC pressure** — the
+6.3 MB/op was being absorbed by the TLAB without surfacing in single-threaded
+wall-clock. Eliminating it removes a real memory-footprint / GC-pressure-under-load
+liability, but it does not — and structurally cannot — change the exponential time of an
+ambiguous nest; that remains Theorem 2's domain.
+
 ## Empirical results (JMH)
 
 Three JMH suites (in `benchmark/`) compare the staged Prog matcher, the staged CPS
@@ -168,7 +269,7 @@ ratios, not absolutes.
 | `(abc)*d` | 16384 | 14.4 | 29.5 | 2.06× |
 
 The ratio is **stable across a 64× size range** (~1.8–2×): both are linear, Prog has the
-better constant (arithmetic backtrack + tight `@tailrec` loop vs CPS's per-iteration
+better constant (arithmetic backtrack + tight `while` loop vs CPS's per-iteration
 method call). More importantly the difference is **also a complexity class in stack
 usage**: CPS's `Rep0` recurses non-tail (one frame per iteration, O(n) stack), so
 `EngineStackRobustnessTests` shows CPS **StackOverflows at n ≈ 131 072** on `a*` while
@@ -176,9 +277,11 @@ Prog's O(1)-stack Backoffs matches **1 000 000+** fine. That is the sharpest sen
 which CPS is strictly worse here.
 
 The GC profiler (`-prof gc`) **corrects a tempting but wrong mechanism**: CPS does *not*
-lose on allocation. Staging inlines its continuations, so CPS allocates ≈0 B/op; Prog
-allocates a *constant* 40 B/op (the count-compressed Backoffs frame + the
-`(Backoffs|Null, Int)` tuple). The win is call/stack overhead, not garbage.
+lose on allocation. Staging inlines its continuations, so CPS allocates ≈0 B/op. Prog
+*originally* allocated a constant 40 B/op (the count-compressed Backoffs frame + the
+`(Backoffs|Null, Int)` tuple); since the allocation-free rewrite (see
+[Implementation](#implementation-the-allocation-free-backoffs-rewrite)) it allocates ≈0
+too. Either way the throughput win here is call/stack overhead, not garbage.
 
 ### 2. Recursive regime, no inner Backoffs loop: Prog = CPS (confirms Theorem 2)
 
@@ -197,24 +300,30 @@ the inner `a+` on the Backoffs fast-path) fails and backtracks exponentially:
 
 | | Prog | CPS | Java |
 |---|---:|---:|---:|
-| time (µs/op) | 3675 | **2132** | 1.50 |
-| alloc (B/op) | **6 291 505** | ≈0 | 808 |
+| time (µs/op) | 3431 | **2111** | 1.52 |
+| alloc, *before* rewrite (B/op) | 6 291 505 | ≈0 | 808 |
+| alloc, *after* rewrite (B/op) | **23** | 14 | 808 |
 
-Prog is **1.7× slower than CPS and allocates 6.3 MB/op**. Cause: the inner `a+` Backoffs
-loop is re-run on every step of the outer exponential search, and *each* re-run pays
-Backoffs' frame + tuple allocation — overhead that staged CPS (pure stack recursion) does
-not have. This is precisely the "collapses into the recursive path, plus the overhead of
-maintaining the frame records — strictly worse, never better" consequence of Theorem 2,
-now observed in the *production* engine, not just the choice-augmented probe.
+When first measured, Prog was **1.6× slower than CPS *and* allocated 6.3 MB/op**. Cause:
+the inner `a+` Backoffs loop is re-run on every step of the outer exponential search, and
+*each* re-run paid Backoffs' frame + tuple allocation — overhead that staged CPS (pure
+stack recursion) does not have. This is precisely the "collapses into the recursive path,
+plus the overhead of maintaining the frame records — strictly worse, never better"
+consequence of Theorem 2, observed in the *production* engine, not just the
+choice-augmented probe.
 
-**Refinement to the architecture claim.** Backoffs is a net win only when its loop is the
-**outer/standalone** control. As an **inner** loop re-entered under an ambiguous outer
-loop, its allocation makes Prog *worse* than plain CPS. The completeness boundary
-(Theorem 1) is unchanged; what shifts is the *performance* story: `bodyNeedsRecursivePath`
-correctly routes the outer loop to recursion, but it still lets the inner fixed-width loop
-use allocating Backoffs, which is the liability. Making Backoffs allocation-free (or
-suppressing it for inner loops under a recursive ancestor) would close this gap — see the
-memory-efficiency work.
+**Refinement to the architecture claim — and what the fix did *not* fix.** The
+allocation-free rewrite (see
+[Implementation](#implementation-the-allocation-free-backoffs-rewrite)) removes the frame
+and tuple, so the inner-loop allocation collapses **6.3 MB/op → ~23 B/op**, on par with
+CPS. But the *time* barely moves: Prog stays ~1.6× slower than CPS on `(?:a+)+b`. That
+null result is the real lesson — the re-entry penalty was **the redundant body-rescanning
+work Theorem 2 predicts, not GC pressure**; the 6.3 MB/op was TLAB-absorbed and never
+showed up in single-threaded wall-clock. So Backoffs is now a net win on *memory*
+everywhere, but on *time* it is still only an advantage when its loop is the
+outer/standalone control: as an inner loop under an ambiguous outer loop it is at best
+CPS-equal (the recursive path it is structurally equivalent to), never faster. The
+completeness boundary (Theorem 1) is, as always, unchanged.
 
 ### vs `java.util.regex`
 

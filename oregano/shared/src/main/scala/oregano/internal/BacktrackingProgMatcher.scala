@@ -6,40 +6,6 @@
 package oregano.internal
 
 import scala.quoted.*
-import scala.annotation.tailrec
-
-final class Backoffs(val width: Int, var count: Int, val parent: Backoffs | Null) {
-    override def toString: String = s"Backoffs(width=$width, count=$count, parent=$parent)"
-}
-
-/*@tailrec
-def forward(nextFn: Int => Int, pos: Int, b: Backoffs): (Backoffs, Int) = {
-    //println(s"forward backoff: ${if b != null then b.toString else "null"}")
-    val next = nextFn(pos)
-    if (next == -1 || next == pos) (b, pos)
-    else {
-        val w = next - pos
-        if b != null && b.width == w then {
-            b.count += 1
-            forward(nextFn, next, b)
-        }
-        else forward(nextFn, next, new Backoffs(w, 1, b))
-    }
-}
-
-@tailrec
-def backtrack(cur: Backoffs, startPos: Int, endPos: Int, i: Int, exitFn: Int => Int): Int = {
-    //println(s"backtrack backoff: ${if cur != null then cur.toString else "null"}")
-    if (cur == null) exitFn(startPos)
-    else if (i < cur.count) {
-        val attemptPos = endPos - i * cur.width
-        val r = exitFn(attemptPos)
-        if r >= 0 then r else backtrack(cur, startPos, endPos, i + 1, exitFn)
-    }
-    else backtrack(cur.parent, startPos, endPos, 0, exitFn)
-}
-*/
-
 
 private object BacktrackingProgMatcher {
     // TODO: encapsulate this state properly
@@ -155,37 +121,40 @@ private object BacktrackingProgMatcher {
                 }
 
                 case InstOp.LOOP => '{
-                    def exit(pos: Int): Int = ${compile(prog, inst.arg, end, input, noCaps, 'pos, cap, wholeMatch, k)}
+                    def exit(p: Int): Int = ${compile(prog, inst.arg, end, input, noCaps, 'p, cap, wholeMatch, k)}
 
-                    @tailrec
-                    def forward(pos: Int, b: Backoffs | Null): (Backoffs | Null, Int) = {
-                        val next = ${compile(prog, inst.out, pc, input, noCaps, 'pos, cap, wholeMatch, (p: Expr[Int]) => p)}
-
-                        if (next == -1 || next == pos) (b, pos)
+                    // Greedy forward scan. `bodyNeedsRecursivePath` guarantees the body is a
+                    // straight-line rune chain (no ALT, no nested LOOP), so every iteration
+                    // advances by the SAME width. The old (width, count) Backoffs frame list
+                    // could therefore only ever hold a single frame with a null parent — so we
+                    // drop the linked list AND the Tuple2 return entirely and track the run with
+                    // three primitive `var`s. This makes the Backoffs path allocation-free.
+                    val start: Int = $pos
+                    var scanPos: Int = start
+                    var count: Int = 0
+                    var width: Int = 0
+                    var scanning: Boolean = true
+                    while (scanning) {
+                        val next: Int = ${compile(prog, inst.out, pc, input, noCaps, 'scanPos, cap, wholeMatch, (p: Expr[Int]) => p)}
+                        if (next == -1 || next == scanPos) scanning = false
                         else {
-                            val w = next - pos
-                            if (b != null && b.width == w) {
-                                b.count += 1
-                                forward(next, b)
-                            }
-                            else forward(next, new Backoffs(w, 1, b))
+                            width = next - scanPos   // constant across iterations (fixed-width body)
+                            count += 1
+                            scanPos = next
                         }
                     }
+                    val finalPos = scanPos
 
-                    @tailrec
-                    def backtrack(cur: Backoffs | Null, base: Int, i: Int): Int = {
-                        if (cur == null) exit($pos)
-                        else if (i < cur.count) {
-                            val attemptPos = base - i * cur.width
-                            val r = exit(attemptPos)
-                            if r >= 0 then r
-                            else backtrack(cur, base, i + 1)
-                        }
-                        else backtrack(cur.parent, base, 0)
+                    // Backtrack by dropping trailing iterations: try the continuation at
+                    // finalPos, finalPos-width, ..., down to start (== finalPos - count*width,
+                    // the i==count case, which is the old `parent == null -> exit(start)` step).
+                    var i = 0
+                    var result = -1
+                    while (result < 0 && i <= count) {
+                        result = exit(finalPos - i * width)
+                        i += 1
                     }
-
-                    val (backoffs, finalPos) = forward($pos, null)
-                    backtrack(backoffs, finalPos, 0)
+                    result
                 }
 
                 case InstOp.CAPTURE =>
