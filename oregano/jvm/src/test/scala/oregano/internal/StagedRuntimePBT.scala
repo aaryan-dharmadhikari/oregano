@@ -48,7 +48,7 @@ class StagedRuntimePBT extends AnyFlatSpec with ScalaCheckPropertyChecks {
     for { n <- Gen.choose(0, 6); cs <- Gen.listOfN(n, charG) } yield cs.mkString
 
   implicit override val generatorDrivenConfig: PropertyCheckConfiguration =
-    PropertyCheckConfiguration(minSuccessful = 30) // each case compiles a matcher
+    PropertyCheckConfiguration(minSuccessful = 300) // each case compiles a matcher (slow; opt-in)
 
   it should "stage the Prog matcher at runtime and agree with java.util.regex" in {
     assume(sys.props.get("oregano.staging").contains("1"),
