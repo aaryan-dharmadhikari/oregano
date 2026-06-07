@@ -49,6 +49,11 @@ lazy val oregano = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     .jsSettings(
         libraryDependencies += "org.scala-lang" %% "scala3-library" % scalaVersion.value
     )
+    .jvmSettings(
+        // runtime multi-stage programming (scala.quoted.staging) is JVM-only; used only by
+        // the opt-in StagedRuntimePBT suite in oregano/jvm/src/test (off by default).
+        libraryDependencies += "org.scala-lang" %% "scala3-staging" % scalaVersion.value % Test
+    )
 
 lazy val benchmark = project
   .in(file("benchmark"))
