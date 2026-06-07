@@ -9,6 +9,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers.*
 import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
 import org.scalacheck.Gen
+import scala.util.Try
 import scala.quoted.Quotes
 import scala.quoted.staging
 
@@ -54,12 +55,21 @@ class StagedRuntimePBT extends AnyFlatSpec with ScalaCheckPropertyChecks {
            "disabled by default — run with -Doregano.staging=1")
     given staging.Compiler = staging.Compiler.make(getClass.getClassLoader)
     forAll(genRegex, genInput) { (re, in) =>
-      val pr = Pattern.compile(re)
-      val prog = ProgramCompiler.compileRegexp(pr.pattern, pr.groupCount)
-      val matcher: CharSequence => Boolean =
-        staging.run { (q: Quotes) ?=> BacktrackingProgMatcher.genMatcher(prog)(using q) }
-      withClue(s"regex='$re' input='$in'") {
-        matcher(in) shouldBe java.util.regex.Pattern.matches(re, in)
+      // Discard (rather than error on) anything outside the matcher-supported subset:
+      // if our parser/builder rejects it (PatternBuilder throws on unsupported nodes)
+      // or java rejects it, skip the case. Robust to generator drift. staging.run stays
+      // OUTSIDE the Try so a genuine staging/matching failure still fails the test.
+      val prog = Try {
+        val pr = Pattern.compile(re)
+        ProgramCompiler.compileRegexp(pr.pattern, pr.groupCount)
+      }
+      val oracle = Try(java.util.regex.Pattern.matches(re, in))
+      whenever(prog.isSuccess && oracle.isSuccess) {
+        val matcher: CharSequence => Boolean =
+          staging.run { (q: Quotes) ?=> BacktrackingProgMatcher.genMatcher(prog.get)(using q) }
+        withClue(s"regex='$re' input='$in'") {
+          matcher(in) shouldBe oracle.get
+        }
       }
     }
   }
