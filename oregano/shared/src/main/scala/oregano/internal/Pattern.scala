@@ -75,7 +75,11 @@ class PatternBuilder {
 
     def compile(regex: Regex): Pattern = regex match {
         case Regex.Lit(c) => Pattern.Lit(c)
-        case Regex.Cat(rs) => Pattern.Cat(rs.foldRight(List.empty[Pattern])((r, acc) => compile(r) :: acc))
+        // NB: map (not foldRight). foldRight forces its cons cells right-to-left, so it would
+        // call `compile` on the rightmost child FIRST — and since `compile` allocates capture
+        // group ids as a side effect (nextGroup += 1), that reversed sibling group numbering
+        // (e.g. `(a)(b)` numbered b=1, a=2). map evaluates left-to-right, matching java.
+        case Regex.Cat(rs) => Pattern.Cat(rs.map(compile))
         case Regex.Alt(r1, r2) => Pattern.Alt(compile(r1), compile(r2))
         case Regex.Class(d) => Pattern.Class(d)
 

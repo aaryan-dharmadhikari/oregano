@@ -52,7 +52,11 @@ private object CPSMatcher {
 
         case Pattern.Rep0(sub, _) => '{
             def self(p: Int): Int =
-                val step = ${compile(sub, input, noCaps, 'p, (next: Expr[Int]) => '{ if $next != p then self($next) else -1 }, groupsExpr)}
+                // Empty-match iteration (next == p): don't recurse (infinite loop) and don't
+                // return -1 (that would unwind the empty iteration's captures). Run the loop
+                // exit at that position so the final empty iteration's group writes survive,
+                // matching java/PCRE last-iteration-wins semantics (see BacktrackingProgMatcher).
+                val step = ${compile(sub, input, noCaps, 'p, (next: Expr[Int]) => '{ if $next != p then self($next) else ${cont(next)} }, groupsExpr)}
                 if step >= 0 then step else ${cont('p)}
             self($pos)
         }
@@ -141,7 +145,9 @@ private object CPSMatcher {
                             val rec = loop(nextPos, groups)
                             if rec >= 0 then rec else -1
                         }
-                        else -1 // prevent infinite loop
+                        // empty match: exit here (keeping this iteration's captures) rather than
+                        // returning -1 (which unwinds them) — java last-iteration-wins semantics
+                        else cont(nextPos, groups)
                     }
 
                     val out = step(pos, groups)

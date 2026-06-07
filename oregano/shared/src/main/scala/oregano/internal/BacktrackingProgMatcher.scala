@@ -111,11 +111,17 @@ private object BacktrackingProgMatcher {
                 // hygiene: `loop`/`p` in the continuation bind to this quote's bindings,
                 // not to anything that shadows them at the inner splice site.
                 case InstOp.LOOP if bodyNeedsRecursivePath(prog, inst.out, pc) => '{
+                    def exit(p: Int): Int = ${compile(prog, inst.arg, end, input, noCaps, 'p, cap, wholeMatch, k)}
                     def loop(p: Int): Int = {
+                        // If the body ADVANCES (next != p) keep iterating; if it matches EMPTY
+                        // (next == p) we must NOT recurse (infinite loop) — but unlike a plain
+                        // `-1` here, we run the loop EXIT at that position so the one empty
+                        // iteration's captures survive (java/PCRE keep the last, empty, iteration's
+                        // group writes; returning -1 would unwind them in the CAPTURE handler).
                         val step = ${compile(prog, inst.out, pc, input, noCaps, 'p, cap, wholeMatch,
-                            (next: Expr[Int]) => '{ if ($next != p) loop($next) else -1 })}
+                            (next: Expr[Int]) => '{ if ($next != p) loop($next) else exit($next) })}
                         if (step >= 0) step
-                        else ${compile(prog, inst.arg, end, input, noCaps, 'p, cap, wholeMatch, k)}
+                        else exit(p)
                     }
                     loop($pos)
                 }
