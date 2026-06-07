@@ -66,5 +66,16 @@ lazy val benchmark = project
     libraryDependencies ++= Seq(
       "org.openjdk.jmh" % "jmh-core" % "1.37",
       "org.openjdk.jmh" % "jmh-generator-annprocess" % "1.37"
-    )
+    ),
+    // These benchmarks target the linear/RE2 staged engine via `matchesLinear`, which is
+    // currently NOT wired into the `Regex` trait (the linear staging block in macro.scala
+    // is commented out), so they don't compile. Exclude them so the rest of the benchmark
+    // module builds and runs. Remove from this list once the linear engine is re-enabled.
+    Compile / unmanagedSources / excludeFilter := {
+      val disabled = Set(
+        "LinearMatchBenchmark.scala", "BranchingBenchmark.scala",
+        "LoopBenchmark.scala", "ScalingBenchmark.scala", "EvalBenchmarks.scala"
+      )
+      new sbt.io.SimpleFilter(disabled.contains)
+    }
   )
