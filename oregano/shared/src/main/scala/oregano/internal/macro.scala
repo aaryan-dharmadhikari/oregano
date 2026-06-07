@@ -13,22 +13,28 @@ private [oregano] def compileMacro(s: String)(using Quotes): Expr[oregano.Regex[
         case Right(ast) =>
             // report.info(s"$ast")
             // val patternResult = Pattern.compile(ast)
-            val PatternResult(p, groupCount, flatControlFlow, _) = Pattern.compile(ast)
+            val PatternResult(p, groupCount, _) = Pattern.compile(ast)
             // report.info(s"expr: $s\nParsley AST: ${ast.toString}\nPattern: ${patternResult.pattern}, groupCount: ${patternResult.groupCount}")
             val prog = ProgramCompiler.compileRegexp(p, groupCount)
             // report.info(s"Prog:\n$prog")
             //val liftedProgExpr = Expr(prog)
             // println(s"Prog:\n$prog")
 
-            // backtracking matcher stuff
+            // The staged Prog backtracking matcher now handles the full supported syntax,
+            // including nested loops and variable-width alternation under repetition: it
+            // uses the flat Backoffs fast-path for fixed-width unambiguous loop bodies and a
+            // recursive continuation-threaded path otherwise (see `bodyNeedsRecursivePath`
+            // and docs/backoffs-completeness.md). There is no longer a class of patterns that
+            // needs the CPS fallback, so we always stage Prog. (`CPSMatcher` survives only as
+            // a differential-test oracle.)
             val backtrackingMatcherWithCapsExpr: Expr[CharSequence => Option[Array[Int]]] =
-                if flatControlFlow then BacktrackingProgMatcher.genMatcherWithCaps(prog) else CPSMatcher.genMatcherPatternWithCaps(p, groupCount)
+                BacktrackingProgMatcher.genMatcherWithCaps(prog)
 
             val backtrackingMatcherExpr: Expr[CharSequence => Boolean] =
-                if flatControlFlow then BacktrackingProgMatcher.genMatcher(prog) else CPSMatcher.genMatcherPattern(p)
+                BacktrackingProgMatcher.genMatcher(prog)
 
             val backtrackingPrefixFinderExpr: Expr[(Int, CharSequence) => Int] =
-                if flatControlFlow then BacktrackingProgMatcher.genPrefixFind(prog) else CPSMatcher.genPrefixFinderPattern(p, groupCount)
+                BacktrackingProgMatcher.genPrefixFind(prog)
             // useful for debugging:
             // val backtrackCPSMatcherExpr = CPSMatcher.genMatcherPattern(p)
             // val backtrackingCPSMatcherWithCaps = CPSMatcher.genMatcherPatternWithCaps(p, groupCount)

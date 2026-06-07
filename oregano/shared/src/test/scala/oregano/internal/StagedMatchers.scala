@@ -22,14 +22,14 @@ object StagedMatchers:
       Quotes
   ): Expr[CharSequence => Boolean] =
     val regex = regexExpr.valueOrAbort
-    val PatternResult(pattern, _, _, _) = Pattern.compile(regex)
+    val PatternResult(pattern, _, _) = Pattern.compile(regex)
     CPSMatcher.genMatcherPattern(pattern)
 
   private def stagedCPSWithCapsImpl(regexExpr: Expr[String])(using
       Quotes
   ): Expr[CharSequence => Option[Array[Int]]] =
     val regex = regexExpr.valueOrAbort
-    val PatternResult(pattern, groupCount, _, _) = Pattern.compile(regex)
+    val PatternResult(pattern, groupCount, _) = Pattern.compile(regex)
     CPSMatcher.genMatcherPatternWithCaps(pattern, groupCount)
 
   /** Compile-time staged matcher using Backtracking engine */
@@ -45,7 +45,7 @@ object StagedMatchers:
       Quotes
   ): Expr[CharSequence => Boolean] =
     val regex = regexExpr.valueOrAbort
-    val PatternResult(pattern, groupCount, _, _) = Pattern.compile(regex)
+    val PatternResult(pattern, groupCount, _) = Pattern.compile(regex)
     val prog = ProgramCompiler.compileRegexp(pattern, groupCount)
     BacktrackingProgMatcher.genMatcher(prog)
 
@@ -53,6 +53,6 @@ object StagedMatchers:
       Quotes
   ): Expr[CharSequence => Option[Array[Int]]] =
     val regex = regexExpr.valueOrAbort
-    val PatternResult(pattern, groupCount, _, _) = Pattern.compile(regex)
+    val PatternResult(pattern, groupCount, _) = Pattern.compile(regex)
     val prog = ProgramCompiler.compileRegexp(pattern, groupCount)
     BacktrackingProgMatcher.genMatcherWithCaps(prog)

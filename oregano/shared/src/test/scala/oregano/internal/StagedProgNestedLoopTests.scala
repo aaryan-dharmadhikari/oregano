@@ -10,10 +10,10 @@ import oregano.internal.StagedMatchers.{stagedProg, stagedProgWithCaps}
 
 /** Nested-loop coverage for the staged backtracking (Prog/Backoffs) engine.
   *
-  * `stagedProg` drives `BacktrackingProgMatcher` directly, so these exercise the
-  * Prog engine on patterns that the macro would normally route to CPS via
-  * `flatControlFlow = false`. Expectations mirror the (passing) CPS nested-loop
-  * suites, so any divergence here is a Prog bug, not a spec disagreement.
+  * `stagedProg` drives `BacktrackingProgMatcher` directly. The macro now stages this
+  * same engine for every pattern (including these nested loops), so this is the engine
+  * that ships. Expectations mirror the (passing) CPS nested-loop suites, so any
+  * divergence here is a Prog bug, not a spec disagreement.
   */
 class StagedProgNestedLoopTests extends AnyFlatSpec {
 

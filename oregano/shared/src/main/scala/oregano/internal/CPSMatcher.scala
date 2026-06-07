@@ -30,6 +30,13 @@ private def dietContains(diet: Diet[Int])(using Quotes): Expr[Int] => Expr[Boole
     }
 }
 
+/** LEGACY. The staged Prog backtracking matcher (`BacktrackingProgMatcher`) now handles
+  * the full supported syntax and is what the macro stages (see macro.scala). `CPSMatcher`
+  * is no longer routed to in production; it is retained as an independent differential-test
+  * oracle (it operates directly on `Pattern`, not the `Prog` IR, so it is a genuinely
+  * separate implementation against which Prog's behaviour is checked). See
+  * docs/backoffs-completeness.md ("CPSMatcher the engine: redundant").
+  */
 private object CPSMatcher {
     private def compile(p: Pattern, input: Expr[CharSequence], noCaps: Int, pos: Expr[Int], cont: Expr[Int] => Expr[Int], groupsExpr: Option[Expr[Array[Int]]])(using Quotes): Expr[Int] = p match {
         case Pattern.Lit(c) => '{if $pos < $input.length && $input.charAt($pos) == ${Expr(c)} then ${cont('{ $pos + 1 })} else -1}

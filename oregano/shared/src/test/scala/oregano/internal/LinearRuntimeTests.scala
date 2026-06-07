@@ -10,7 +10,7 @@ import org.scalatest.matchers.should.Matchers.*
 import org.scalatest.prop.TableDrivenPropertyChecks.*
 
 inline def getMachine(inline regEx: String): RE2Machine = {
-  val PatternResult(pattern, groupCount, _, _) =
+  val PatternResult(pattern, groupCount, _) =
     Pattern.compile(regEx)
   val prog = ProgramCompiler.compileRegexp(pattern, groupCount)
   RE2Machine(prog)

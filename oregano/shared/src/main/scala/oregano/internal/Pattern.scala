@@ -61,25 +61,13 @@ object Pattern {
         pat.build(regex)
     }
 
-    def checkForNestedLoop(pat: Pattern, seenLoop: Boolean = false): Boolean = pat match {
-        case Pattern.Rep0(_, _) if seenLoop => true
-        case Pattern.Rep0(p, _)             => checkForNestedLoop(p, true)
-        case Pattern.Alt(left, right)       => checkForNestedLoop(left, seenLoop) || checkForNestedLoop(right, seenLoop)
-        case Pattern.Cat(ps)                => ps.exists(p => checkForNestedLoop(p, seenLoop))
-        case Pattern.Capture(_, p)          => checkForNestedLoop(p, seenLoop)
-        case _                              => false
-    }
-
-    // for now, protect against nested loops
-    def checkFlatControlFlow(pat: Pattern): Boolean = !checkForNestedLoop(pat)
-
     def compile(regex: String): PatternResult = {
         val re: Regex = parse(regex).getOrElse(throw IllegalArgumentException(s"Invalid regex: $regex"))
         compile(re)
     }
 }
 
-final case class PatternResult(pattern: Pattern, groupCount: Int, flatControlFlow: Boolean, numReps: Int)
+final case class PatternResult(pattern: Pattern, groupCount: Int, numReps: Int)
 
 class PatternBuilder {
     var nextGroup: Int = 1 // note that 1 is reserved for the whole match, as with other engines
@@ -123,8 +111,7 @@ class PatternBuilder {
     def build(regex: Regex): PatternResult = {
         val pattern = compile(regex)
         val groupCount = nextGroup
-        val flatControlFlow = Pattern.checkFlatControlFlow(pattern)
         val numReps = this.numReps + 1
-        PatternResult(pattern, groupCount, flatControlFlow, numReps)
+        PatternResult(pattern, groupCount, numReps)
     }
 }

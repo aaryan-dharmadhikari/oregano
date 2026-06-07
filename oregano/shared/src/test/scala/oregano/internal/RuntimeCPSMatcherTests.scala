@@ -11,7 +11,7 @@ import org.scalatest.prop.TableDrivenPropertyChecks.*
 
 class RuntimeCPSMatcherTests_NestedLoops extends AnyFlatSpec {
 
-  val PatternResult(pattern, groupCount, _, numReps) =
+  val PatternResult(pattern, groupCount, numReps) =
     Pattern.compile("((a*)b*)*bc|(def)")
 
   behavior of "CPSMatcher"
@@ -66,7 +66,7 @@ class RuntimeCPSMatcherTests_NestedLoops extends AnyFlatSpec {
 
 class RuntimeCPSMatcherTests_Grouping extends AnyFlatSpec {
 
-  val PatternResult(pattern, groupCount, _, numReps) =
+  val PatternResult(pattern, groupCount, numReps) =
     Pattern.compile("(a|b)*c[0-9]")
 
   behavior of "CPSMatcher - regex (a|b)*c[0-9]"
@@ -107,7 +107,7 @@ class RuntimeCPSMatcherTests_Grouping extends AnyFlatSpec {
 
 class RuntimeCPSMatcherTests_ComplexExpression extends AnyFlatSpec {
 
-  val PatternResult(pattern, groupCount, _, numReps) =
+  val PatternResult(pattern, groupCount, numReps) =
     Pattern.compile("((ab)*|[cd]*)e(f|g)[0-9]")
 
   behavior of "CPSMatcher - ((ab)*|[cd]*)e(f|g)[0-9]"
@@ -154,7 +154,7 @@ class RuntimeCPSMatcherTests_ComplexExpression extends AnyFlatSpec {
 
 class RuntimeCPSMatcherTests_BacktrackingHeavy extends AnyFlatSpec {
 
-  val PatternResult(pattern, groupCount, _, numReps) =
+  val PatternResult(pattern, groupCount, numReps) =
     Pattern.compile("((a|aa)*)b")
 
   behavior of "CPSMatcher - ((a|aa)*)b"
@@ -201,7 +201,7 @@ class RuntimeCPSMatcherTests_BacktrackingHeavy extends AnyFlatSpec {
 
 class RuntimeCPSMatcherTests_WithCapturesNestedLoops extends AnyFlatSpec {
 
-  val PatternResult(pattern, groupCount, _, numReps) =
+  val PatternResult(pattern, groupCount, numReps) =
     Pattern.compile("((a*)b*)*bc|(def)")
 
   behavior of "CPSMatcher.matchesWithCaps - ((a*)b*)*bc|(def)"
@@ -246,7 +246,7 @@ class RuntimeCPSMatcherTests_WithCapturesNestedLoops extends AnyFlatSpec {
 
 class RuntimeCPSMatcherTests_NestedAltRep extends AnyFlatSpec {
 
-  val PatternResult(pattern, groupCount, _, numReps) =
+  val PatternResult(pattern, groupCount, numReps) =
     Pattern.compile("(((a)|b|cd)*)e")
 
   behavior of "CPSMatcher.matchesWithCaps - (((a)|b|cd)*)e"
