@@ -333,3 +333,88 @@ certainly a JDK intrinsic) and (b) spectacularly on `(?:a+)+b` (1.5 µs — it c
 not perform the 2¹⁹ walk our naive backtracker does). Two honest caveats: Oregano has **no
 ReDoS mitigation**, and Java itself failed to complete `(a|b)*#` at n ≥ 4096 (its own
 long-input blowup), where both Oregano engines stayed linear.
+
+## Future extensions: widening the Backoffs regime by extending the instruction set
+
+The completeness boundary (Theorem 1) and the allocation-free rewrite together pin down
+*why* the current Backoffs path is shaped the way it is — but they also mark exactly where
+it could be **widened**. These are lateral avenues, in increasing order of analysis
+difficulty. None is foreclosed by the rewrite: the single-frame fast path is a strict
+special case, and the multi-frame structure is recoverable from this document and git
+history.
+
+### A sharper statement of Theorem 1: the real condition is *unambiguity*, not fixed-width
+
+Theorem 1 is stated as "complete iff fixed-width **and** unambiguous", but the necessity
+proof only ever uses *ambiguity* — its witnesses (`(a|ab)`, `(b*)*`) match a position in
+**two** ways. Fixed-width is **sufficient, not necessary**. If a body is *unambiguous* (at
+most one match at every position) but its width *varies* with the input, there is still a
+**single forced greedy chain** — no choices to explore — so every legitimate loop-end is a
+prefix of that one chain, and backtracking it longest-first is complete.
+
+Example: `(a|bb)*c` on `"abbc"`. The body matches deterministically — `a` only before an
+`a`, `bb` only before `bb` — so the chain is the single width sequence `1, 2` (positions
+`{0,1,3}`); dropping iterations finds `c` at 3. No ambiguity, no missed chain.
+
+This is precisely the case the **multi-frame `(width, count, parent)` list** existed for: a
+single chain whose runs have *different* widths. It is dead today only because the router
+(`bodyNeedsRecursivePath`) conservatively rejects **every** alternation. So the extensions
+below are mostly about *relaxing the router* — and giving it the instructions it needs to
+recognise the safe cases — not about changing the backtrack algorithm.
+
+### Avenue A — equal-width unambiguous alternations (stays single-frame, zero-alloc)
+
+`(a|b)` is already `[ab]` (a single `RUNE` class — already on the Backoffs path). The gap
+is **multi-character equal-length** branches like `(ab|cd)` or `(foo|bar)`: today they
+compile to `ALT` and are kicked to recursion, even though they are fixed-width and mutually
+exclusive, hence single-frame-safe.
+
+- *INST extension:* a fixed-width "deterministic choice" instruction — match one of a set
+  of **equal-length** branches via a small switch/trie, advancing by the common width `w`.
+- *Cost:* none beyond the current impl — width stays constant, so it remains **one frame,
+  O(1) stack, zero allocation**.
+- *Upside already quantified:* `(a|b)*#` currently runs `prog_alt` ≈ `cps_alt` (~87 µs at
+  n = 16384) because it takes the recursive path; on Backoffs it should pick up the same
+  ~2–3× constant the other fixed-width loops enjoy.
+- *Risk: low.* The check ("branches equal-length and mutually exclusive") is local and
+  conservative; a false negative merely keeps the status quo (recursion).
+
+### Avenue B — unequal-width unambiguous alternations (resurrects the multi-frame list)
+
+`(a|bb)`, `(foo|barbaz)`: unambiguous (branches width/prefix-disjoint) but
+**variable-width**. These need the deleted machinery back — multiple `(width, count)` runs
+and a `backtrack` that descends across width changes.
+
+- *INST / representation:* reinstate the frame list, but as a **bounded `int[]` of
+  `(width, count)` runs** rather than a heap linked list, so allocation stays small (the
+  number of distinct-width *runs* is typically tiny even when widths vary).
+- *Cost:* re-introduces bounded allocation (∝ #distinct-width-runs, not #iterations) and a
+  non-trivial **static ambiguity analysis**: proving the branches cannot both match at any
+  reachable position (prefix-freeness / determinism).
+- *Risk: high, and asymmetric.* A wrong "unambiguous" verdict does not cost performance —
+  it silently reintroduces the `(a|ab)` **correctness** bug (a missed valid match). This is
+  exactly why fixed-width is the current proxy: cheap and safe. Treat B as an
+  analysis-gated project, not a quick win.
+
+### Avenue C — possessive / atomic quantifiers (forward-scan only, *no history at all*)
+
+A possessive `a*+` or atomic `(?>a*)` greedily matches and **never gives back**. For
+Backoffs that means: run the `forward` scan, then **skip `backtrack` entirely** and
+continue the match at `finalPos` only.
+
+- *Key property:* this is complete for **any** body — even an ambiguous one — because
+  possessive semantics *define away* the alternative chains. There is no history to store
+  and nothing to backtrack: O(n) time, O(1) stack, zero allocation, unconditionally.
+- *INST extension:* a possessive/atomic loop flag (parser + a `LOOP` variant that omits the
+  backtrack arm).
+- *Bonus — ReDoS:* possessive quantifiers are a standard catastrophic-backtracking
+  mitigation. Removing the backtrack arm breaks the re-entry blow-up of §3 (`(?:a+)+b`) by
+  construction. This is the cheapest concrete step toward the ReDoS resistance discussed
+  above — narrower than wiring in the full linear engine, but sound and useful wherever the
+  author can assert "don't give back".
+
+### Suggested ordering
+
+**A** (clear win, low risk, upside already measured) → **C** (unconditionally safe, opens a
+ReDoS mitigation, modest parser work) → **B** (widest reach, but gated on a real ambiguity
+analysis and a measured allocation trade).
