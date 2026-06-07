@@ -95,6 +95,14 @@ records — strictly worse, never better. The recursive continuation path is the
 work-optimal complete mechanism for ambiguous bodies; Backoffs' advantage is
 *fundamentally confined* to the fixed-width-unambiguous regime of Theorem 1.
 
+**Empirical confirmation (§ii).** `ChoiceBackoffsCollapseProbe` implements exactly
+this choice-augmented Backoffs for `(w₀|w₁|…)* T` and compares it to a plain
+recursive backtracker, both instrumented with a body-evaluation counter. They agree
+on every short string, and the augmented matcher performs the **identical** number
+of body evaluations as recursion (e.g. `(a|ab)*c` on `"ab"×8+"c"`: 43 vs 43; on
+`"a"×16+"c"`: 19 vs 19) — it re-runs `forward` on each branch flip, i.e. it is the
+recursive backtracker, plus the cost of maintaining the frame records. No win.
+
 ## Design consequence
 
 ```
